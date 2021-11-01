@@ -1,0 +1,256 @@
+---
+title: "Comparing Social Mobility across Countries with the UNIDIFF Model"
+output: github_document
+params:
+  data: 
+    label: Path to data file
+    value: NULL
+    input: file
+  artefacts: 
+    label: Save artefacts (simulated data and intermediate objects)?
+    value: FALSE
+    input: file
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(comment = "")
+saved_results <- is.null(params$data)
+if (saved_results){
+    for (nm in c("dev", "df", "periodContr", "classContr",
+                 "modelC", "modelD", "modelEa", "modelJ")){
+        assign(nm, readRDS(file.path("UNIDIFF_artefacts", "saved_results",
+                                     paste0(nm, ".rds"))))
+    }
+}
+```
+
+## Loading required packages
+
+```{r packages}
+library(gnm)
+library(vcdExtra)
+```
+
+## Pre-processing the Data
+
+The survey data is read into R, selecting the variables of interest: the five-year period, the eight-category social class variable for father and respondent, and the weighted frequencies. The period and social class variables are converted to factors.
+
+
+```{r read-data, eval = !saved_results}
+allMen <- read.table(params$data, header = FALSE)[, c(4, 10, 12, 14)]
+colnames(allMen) <- c("period", "origin8", "dest8", "wFreq")
+allMen[,1:3] <- lapply(allMen[, 1:3], factor)
+```
+
+Following the analysis by Ganzeboom and Luijkx (in Social Mobility in Europe, ed. R. Breen, 2004), we collapse the data by the factors `period`, `origin8`, and `dest8`.
+
+```{r dataI, eval = !saved_results}
+dataI <- as.data.frame(xtabs(wFreq ~ period + origin8 + dest8, data = allMen))
+```
+
+Since the response is a weighted frequency, the resulting counts are non-integer. This generates multiple warnings during the model fitting, which are suppressed in the output below.
+## Modelling
+We first fit the conditional independence model as a baseline (the model names refer to the names used in Ganzeboom and Luijkx, 2004):
+
+```{r indep, eval = !saved_results}
+modelA <- suppressWarnings(gnm(Freq ~ -1 + period:origin8 + period:dest8,
+                               family = poisson, data = dataI, verbose = FALSE))
+```
+
+Then we update this model to the unstructured UNIDIFF model, using `Exp` to ensure the period multipliers are non-negative and the `ofInterest` argument to mark these parameters as the only ones that should be included in model summaries.
+
+```{r unstructured, eval = !saved_results}
+modelC <- update(modelA, . ~ . + Mult(Exp(period), origin8:dest8),
+                 ofInterest = "[.]period")
+dev <- c("C" = deviance(modelC))
+df <- c("C" = df.residual(modelC))
+```
+```{r modelC-stats}
+dev["C"]
+df["C"]
+```
+
+The `getContrasts()` function is used to obtain simple contrasts of the log-multipliers along with their quasi-variances:
+
+```{r calc-periodContr, eval = !saved_results}
+periodContr <- getContrasts(modelC, ofInterest(modelC))
+```
+```{r summary-periodContr}
+summary(periodContr)
+```
+
+We then consider two models suggested by Ganzeboom and Luijkx, with either a linear or quadratic dependence of the multipliers on period number.
+
+```{r multiplier-dependence, eval = !saved_results}
+modelD <- update(modelA, . ~ . + Mult(Const(1) + as.numeric(period),
+                                      origin8:dest8),
+                 ofInterest = "[.]as")
+modelE <- update(modelA, . ~ . +
+                 Mult(Const(1) + as.numeric(period)+ I(as.numeric(period)^2),
+                      origin8:dest8),
+                 ofInterest = "[.]as")
+dev <- c(dev, "D" = deviance(modelD), "E" = deviance(modelE))
+df <- c(df, "D" = df.residual(modelD), "E" = df.residual(modelE))
+```
+```{r modelDE-stats}
+dev[c("D", "E")]
+df[c("D", "E")]
+```
+
+Finally we propose a model in which the log-multipliers depend on period number -- note a `Const` term is unnecessary here as this would simply scale the multipliers by a constant.
+
+```{r log-multiplier-dependence, eval = !saved_results}
+modelEa <- update(modelA, . ~ . + Mult(Exp(as.numeric(period)), origin8:dest8),
+                  ofInterest = "[.]as")
+dev <- c(dev, "Ea" = deviance(modelEa))
+df <- c(df, "Ea" = df.residual(modelEa))
+```
+```{r modelEa-stats}
+dev["Ea"]
+df["Ea"]
+```
+
+Having considered a selection of models, we impose some identifiability constraints, for presentational purposes. For the UNIDIFF model, we constrain the log-multiplier for the first period to 0:
+
+```{r constrain-modelC, eval = !saved_results}
+modelC <- update(modelC, constrain = "[.]period1", constrainTo = 0)
+```
+
+For the structured UNIDIFF models, we fix the origin-destination interaction as in `modelC` - note that this constraint slightly impairs model fit, but enables the multipliers to be directly compared as in the plot below.
+
+```{r constrain-D-and-Ea, eval = !saved_results}
+keep <- pickCoef(modelC, "[.]origin")
+modelD <- update(modelD, constrain = "[.]origin",
+                 constrainTo = coef(modelC)[keep],
+                 ofInterest = "[.]as")
+modelEa <- update(modelEa, constrain = "[.]origin",
+                  constrainTo = coef(modelC)[keep],
+                  ofInterest = "[.]as")
+```
+
+A plot of the period contrasts from the UNIDIFF model and a second plot of the corresponding scaling factors are created as follows. The points are joined by lines in the second plot to highlight the trends in the estimates.
+
+```{r periodContr, tidy = FALSE, dev = "png", fig.width = 900/72, fig.height = 500/72, out.width = "100%", fig.alt = "contrasts of period multipliers"}
+par(mfrow = c(1,2), mar = c(4.5, 4.1, 3.1, 1.1), cex = 0.9, mex = 0.8,
+    oma = c(0, 0, 0, 0))
+plot(periodContr, xaxt = "n", xlab = "Period",
+     ylab = "Log-multipliers of origin-destination association",
+     main = "")
+axis(1, lab = c("1970-4", "1975-9", "1980-4", "1985-9", "1990-4", "1995-9"),
+     at = 1:6)
+mtext("a)", side = 2, line = 2, at = 0.19, las = 2)
+plot(1:6, exp(parameters(modelC)[ofInterest(modelC)]), ylim = c(0.6, 1.0),
+     xlab = "Period number",
+     ylab = "Multipliers of origin-destination association")
+lines(1:6, 1 + coef(modelD)[ofInterest(modelD)]*1:6, lty = 2)
+lines(1:6, exp(coef(modelEa)[ofInterest(modelEa)]*1:6), lty = 1)
+mtext("b)", side = 2, line = 2, at = 1.03, las = 2)
+```
+
+We finally consider the Goodman-Hauser model selected by Ganzeboom and Luijkx:
+
+```{r GHmodel, eval = !saved_results}
+modelJ <- update(modelA, . ~ . + Diag(origin8, dest8) +
+                 Mult(Const(1) + as.numeric(period), MultHomog(origin8, dest8)),
+                 etastart = modelA$predictors)
+dev <- c(dev, "J" = deviance(modelJ))
+df <- c(df, "J" = df.residual(modelJ))
+```
+```{r modelJ-stats}
+dev["J"]
+df["J"]
+```
+
+This time we focus on the homogenous multiplicative effects of origin/destination class, using `getContrasts` to obtain the simple contrasts of these parameters for summary and display:
+
+```{r class-contrasts, eval = !saved_results}
+classContr <- getContrasts(modelJ, pickCoef(modelJ, "[.]origin"))
+```
+```{r summary-classContr}
+summary(classContr)
+
+```
+```{r classContr, dev = "png", fig.width = 600/72, fig.height = 500/72, out.width = "100%", fig.alt = "contrasts of class multipliers"}
+plot(classContr, xaxt = "n", xlab = "Social class",
+     ylab = "Multiplicative effects of origin/destination class",
+     main = "")
+axis(1, lab = c("I", "II", "III", "IVab", "IVc", "V + VI", "VIIa", "VIIb"),
+     at = 1:8)
+```
+
+We evaluate the fit of this model by plotting the aggregate residuals:
+
+```{r GHmosaic, dev = "png", fig.width = 570/72, fig.height = 475/72, out.width = "100%", fig.alt = "aggregate residuals from Goodman-Hauser model"}
+mosaic(modelJ, ~origin8 + dest8,
+       set_varnames =
+       list(origin8 = "Origin class", dest8 = "Destination class"),
+       set_labels =
+       list(origin8 = c("I", "II", "III", "IVab", "IVc", "V + VI", "VIIa", "VIIb"),
+       dest8 = c("I", "II", "III", "IVab", "IVc", "V + VI", "VIIa", "VIIb")),
+       rot_labels = c(0, 0), offset_varnames = c(0.3, 0, 0, 1.3),
+       offset_labels = c(0, 0, 0, 0.3), margins = c(1, 1, 0, 4))
+```
+
+## References
+Ganzeboom, Harry B. G., and Ruud Luijkx. 2004. “Recent trends in intergenerational occupational class reproduction in the Netherlands 1970-99.” In *Social Mobility in Europe*, edited by Richard Breen, 345–81. Oxford University Press.
+
+```{r simulated, eval = params$artefacts, include = FALSE}
+# simulate counts based on modelEa 
+set.seed(1)
+sim_freq <- simulate(modelEa, nsim = 1)[[1]]
+# create dummy data.frame
+dat <- matrix(NA, nrow = nrow(dataI), ncol = 14)
+dat[,c(4, 10, 12)] <- vapply(dataI[, 1:3], unclass, numeric(nrow(dataI)))
+dat[,14] <- sim_freq
+# write files
+output_dir <- "UNIDIFF_artefacts/simulated_data"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+write.table(dat, file.path(output_dir, "social_class.txt"), row.names = FALSE,
+            col.names = FALSE)
+
+```
+```{r save-results, eval = params$artefacts, include = FALSE}
+results_dir <- "UNIDIFF_artefacts/saved_results"
+## keep coef info only for models C, D, Ea
+coef_info <- function(mod){
+    res <- mod[c("coefficients", "ofInterest", "constrain", "constrainTo")]
+    class(res) <- class(mod)
+    res
+}
+## keep info on modelJ to reproduce mosaic plot
+mosaic_info <- function(mod){
+    res <- mod[c("coefficients", "ofInterest", "constrain", "constrainTo",
+                 "call", "df.residual", "na.action", "family")]
+    ## aggregate over period, round as in Table 14.A2 of Ganz04
+    res$data <- as.data.frame(xtabs(Freq ~ origin8 + dest8, data = dataI))
+    res$data$Freq <- round(res$data$Freq, 1)
+    ## fitted values can be put to anything here
+    n <- length(res$data$Freq)
+    res$fitted.values <- rep.int(100, n)
+    ## fix residuals to correct values and add in dummy values
+    ## (so it seems there is more than one value to average)
+    zero <- res$data
+    zero$Freq <- 0
+    res$data <- rbind(res$data, zero)
+    res$y <- res$data$Freq
+    mean_resid <- meanResiduals(mod, by = ~origin8:dest8)
+    res$residuals <- c(c(mean_resid)/sqrt(res$fitted.values), 
+                       numeric(nrow(zero)))
+    res$predictors <- c(log(res$fitted.values), rep(-Inf, n))
+    res$fitted.values <- c(res$fitted.values, rep(1, n))
+    res$prior.weights <- rep.int(1, 2*n)
+    res$x <- matrix(1, nrow = 2*n) # dummy as rank has no impact
+    class(res) <- class(mod)
+    res
+}
+
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+for (nm in c("dev", "df", "periodContr", "classContr")){
+    saveRDS(get(nm), file.path(results_dir, paste0(nm, ".rds")))
+}
+for (mod in c("modelC", "modelD", "modelEa")){
+    saveRDS(coef_info(get(mod)), file.path(results_dir, paste0(mod, ".rds")))
+}
+saveRDS(mosaic_info(modelJ), file.path(results_dir, "modelJ.rds"))
+```
+
